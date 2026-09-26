@@ -77,9 +77,11 @@ jobs:
 
       - name: Configure project
         run: |
-          cmake --preset "$CMAKE_PRESET" `
-            -D VCPKG_HOST_TRIPLET="$VCPKG_TRIPLET" `
-            -D VCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" `
+          # Line continuations are backslashes: these steps run under bash, where a
+          # backtick opens a command substitution and swallows the rest of the script.
+          cmake --preset "$CMAKE_PRESET" \
+            -D VCPKG_HOST_TRIPLET="$VCPKG_TRIPLET" \
+            -D VCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" \
             -D CMAKE_TOOLCHAIN_FILE=cmake/vcpkg/scripts/buildsystems/vcpkg.cmake
 
       - name: Run build
