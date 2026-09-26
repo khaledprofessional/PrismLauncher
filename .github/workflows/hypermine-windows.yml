@@ -52,13 +52,30 @@ jobs:
           # Upstream's setup points vcpkg's binary cache at a GitHub Packages feed owned by
           # PrismLauncher, authenticated with a token scoped to write packages. Neither
           # exists on a fork, so a cache lookup there can only fail -- and "clear" in the
-          # source list also wipes the default. Building the dependencies from source is
-          # slower but actually works without secrets.
+          # source list also wipes the default. Building from source is slower but needs
+          # no secrets.
           echo "VCPKG_BINARY_SOURCES=clear" >> "$GITHUB_ENV"
+
+      # Run explicitly rather than relying on the CMake toolchain to trigger the manifest
+      # install. When vcpkg runs inside cmake --preset, its output lands in the middle of
+      # that step's log next to a multi-kilobyte environment dump, and a failure there is
+      # easy to miss: cmake carries on and only later complains that ECM is missing. As
+      # its own step it is unambiguous, and --log-failed shows all of it.
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          & cmake/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed ($LASTEXITCODE)" }
+          cmake/vcpkg/vcpkg.exe install --triplet "$env:VCPKG_TRIPLET" `
+            --x-install-root "$($PWD.Path)/vcpkg_installed"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
 
       - name: Configure project
         run: |
-          cmake --preset "$CMAKE_PRESET" -D VCPKG_HOST_TRIPLET="$VCPKG_TRIPLET" -D VCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET"
+          cmake --preset "$CMAKE_PRESET" `
+            -D VCPKG_HOST_TRIPLET="$VCPKG_TRIPLET" `
+            -D VCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" `
+            -D CMAKE_TOOLCHAIN_FILE=cmake/vcpkg/scripts/buildsystems/vcpkg.cmake
 
       - name: Run build
         run: |
