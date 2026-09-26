@@ -110,8 +110,26 @@ class WireGuardTunnel : public QObject {
      * A non-zero `lastHandshake` alone is not enough: `wg` keeps the timestamp from
      * before the interface went away, so a tunnel that dropped an hour ago still
      * reports one. Age is the only honest test.
+     *
+     * Always false on Windows, where `wg show` needs elevation and so no handshake
+     * timestamp can be read. Use {@link isUsable} instead of calling this directly.
      */
     bool isHandshakeFresh(qint64 maxAgeSeconds = 180) const;
+
+    /**
+     * Whether the tunnel can currently be used to reach the server.
+     *
+     * This is the test callers should use, because what "usable" can mean differs by
+     * platform and the difference should not leak out of this class:
+     *
+     *  - where `wg show` is readable without privileges (Linux, macOS) the peer must
+     *    have handshaked recently;
+     *  - on Windows the interface merely being present is the strongest statement
+     *    available, because the handshake timestamp is behind an elevation boundary.
+     *    A caller that needs certainty the *server* is reachable should probe it, which
+     *    needs no privileges.
+     */
+    bool isUsable() const;
 
     /**
      * Bring the tunnel up. Does nothing when it is already up; fails with a readable
@@ -173,6 +191,16 @@ class WireGuardTunnel : public QObject {
     static QPair<QString, QStringList> upInvocation(const QString& conf);
     /** Program and arguments that take the tunnel down. */
     static QPair<QString, QStringList> downInvocation(const QString& interfaceName, const QString& conf);
+    /**
+     * On Windows, make sure the WireGuard manager service exists before installing a
+     * tunnel into it. A no-op elsewhere.
+     */
+    void ensureManagerService();
+    /**
+     * Windows status path: read tunnel presence from the network stack instead of
+     * `wg show`, which needs elevation there. See the implementation for why.
+     */
+    void refreshFromNetworkStack();
 
     /** Write the canonical `<name>.conf`. False on failure, with `error` set. */
     bool writeConfFile(QString* error) const;
@@ -193,6 +221,8 @@ class WireGuardTunnel : public QObject {
     LoggedProcess* m_process = nullptr;
     /** False for status polls, true while bringing a tunnel up or down. */
     bool m_forwardToolLogs = true;
+    /** Windows: the manager service only needs installing once per session. */
+    bool m_managerEnsured = false;
     /** Consecutive `wg show` failures seen while the tunnel was up. */
     int m_consecutiveFailures = 0;
 };

@@ -21,6 +21,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
+#include <QNetworkInterface>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -176,7 +177,12 @@ QPair<QString, QStringList> WireGuardTunnel::upInvocation(const QString& conf)
 #if defined(Q_OS_WIN)
     // The interface name comes from the file name, which is why the conf is written to a
     // canonical location before this is called.
-    return { installToolPath(), { "/installtunnels", conf } };
+    //
+    // The flag is /installtunnelservice, not the older /installtunnels. Verified against
+    // the tool's own usage message on WireGuard for Windows 1.1.1, which rejects
+    // /installtunnels outright. The manager service also has to exist first; see
+    // ensureManagerService().
+    return { installToolPath(), { "/installtunnelservice", conf } };
 #else
     return { QStringLiteral("pkexec"), { wgQuickPath(), QStringLiteral("up"), conf } };
 #endif
@@ -186,10 +192,36 @@ QPair<QString, QStringList> WireGuardTunnel::downInvocation(const QString& inter
 {
 #if defined(Q_OS_WIN)
     Q_UNUSED(conf)
-    return { installToolPath(), { "/uninstalltunnels", interfaceName } };
+    // Takes the tunnel name, not the config path, and is likewise /...tunnelservice.
+    return { installToolPath(), { "/uninstalltunnelservice", interfaceName } };
 #else
     Q_UNUSED(interfaceName)
     return { QStringLiteral("pkexec"), { wgQuickPath(), QStringLiteral("down"), conf } };
+#endif
+}
+
+void WireGuardTunnel::ensureManagerService()
+{
+#if defined(Q_OS_WIN)
+    // wireguard.exe with no arguments elevates and installs the manager service, which
+    // /installtunnelservice then talks to. Without it the install fails with no useful
+    // message, because wireguard.exe is a GUI binary and says nothing on stdout.
+    const QString tool = installToolPath();
+    if (tool.isEmpty()) {
+        return;
+    }
+    if (m_managerEnsured) {
+        return;
+    }
+    m_managerEnsured = true;
+    runTool(tool, {}, [this, tool](int exitCode, const QString&) {
+        if (exitCode != 0) {
+            emit logMessage(tr("Could not install the WireGuard manager service (%1); importing a tunnel may fail.")
+                               .arg(exitCode));
+        }
+    });
+#else
+    Q_UNUSED(this)
 #endif
 }
 
@@ -425,6 +457,8 @@ void WireGuardTunnel::bringUp()
     m_consecutiveFailures = 0;
     const auto [program, args] = upInvocation(conf);
     setForwardToolLogs(true);
+    // The manager service has to exist before a tunnel can be installed into it.
+    ensureManagerService();
 
     emit logMessage(tr("Bringing up the %1 tunnel...").arg(m_interface.name));
     setState(State::Starting);
@@ -509,12 +543,26 @@ void WireGuardTunnel::refresh()
     if (!hasInterface()) {
         return;
     }
-    // One tool at a time. Without this a 1.5s tick that lands while the previous `wg show`
-    // is still running would cancel it, and the cancelled call's own error path would
-    // conclude that a perfectly healthy tunnel had gone down.
     if (isBusy()) {
         return;
     }
+#if defined(Q_OS_WIN)
+    // `wg show` reads the tunnel's configuration from a protected registry key, so on
+    // Windows it fails with "Permission denied" unless the whole process is elevated --
+    // and a launcher is not. An unelevated `wg show <iface> dump` returns exit code 1
+    // for *every* subcommand, verified on WireGuard for Windows 1.1.1.
+    //
+    // Interface presence is therefore read from the network stack instead, which needs
+    // no privileges: a WireGuard tunnel is an ordinary adapter, and iphlpapi reports it
+    // with its tunnel address whether or not we may read WireGuard's own state.
+    //
+    // What this cannot do is report a handshake timestamp. So on Windows the tunnel
+    // reports "up" from the interface, and whether the peer is actually reachable is
+    // decided by the caller probing the server address -- which is the question that
+    // actually matters, and the one that needs no privileges either.
+    refreshFromNetworkStack();
+    return;
+#else
     const QString wg = wgToolPath();
     if (wg.isEmpty()) {
         stopPolling();
@@ -624,6 +672,75 @@ void WireGuardTunnel::refresh()
             emit statusChanged();
         }
     });
+#endif  // Q_OS_WIN
+}
+
+/**
+ * Windows status path: read tunnel presence from the network stack.
+ *
+ * A WireGuard tunnel is an ordinary network adapter, so it shows up through
+ * QNetworkInterface along with its tunnel address -- no elevation required. Matching on
+ * the address rather than the adapter name is deliberate: Windows names the adapter
+ * after the tunnel, but the address is what the config actually promised, so a stale
+ * adapter with a matching name cannot be mistaken for a live tunnel.
+ */
+void WireGuardTunnel::refreshFromNetworkStack()
+{
+    const QString local = m_interface.localHost();
+    bool present = false;
+    QString foundAddress;
+
+    const auto interfaces = QNetworkInterface::allInterfaces();
+    for (const QNetworkInterface& candidate : interfaces) {
+        if (!(candidate.flags() & QNetworkInterface::IsRunning)) {
+            continue;
+        }
+        const auto entries = candidate.addressEntries();
+        for (const QNetworkAddressEntry& entry : entries) {
+            if (!local.isEmpty() && entry.ip().toString() == local) {
+                present = true;
+                foundAddress = entry.ip().toString();
+                break;
+            }
+        }
+        if (present) {
+            break;
+        }
+    }
+
+    // No handshake data is available without elevation, so the timestamp is left at zero
+    // and isHandshakeFresh() is deliberately not the test on this platform. Callers use
+    // isUp() plus their own reachability probe instead.
+    m_status.lastHandshake = 0;
+
+    if (present) {
+        m_status.endpoint = m_interface.peer.endpoint;
+        if (m_status.state != State::Up) {
+            m_upSince.start();
+            setState(State::Up);
+            emit logMessage(tr("The %1 tunnel is up (%2).").arg(m_interface.name, foundAddress));
+            m_pollTimer->start();
+        }
+        emit statusChanged();
+        return;
+    }
+
+    if (m_status.state == State::Starting) {
+        if (m_upSince.isValid() && m_upSince.elapsed() < kStartTimeoutMs) {
+            return;  // still inside the bring-up window
+        }
+        stopPolling();
+        setState(State::Failed,
+                 tr("The tunnel did not come up within %1 seconds. Check that the endpoint is reachable and that "
+                    "the keys match the server.")
+                     .arg(kStartTimeoutMs / 1000));
+        return;
+    }
+    if (m_status.state == State::Up) {
+        emit logMessage(tr("The %1 tunnel went down.").arg(m_interface.name));
+    }
+    stopPolling();
+    setState(State::Down);
 }
 
 bool WireGuardTunnel::isHandshakeFresh(qint64 maxAgeSeconds) const
@@ -639,6 +756,20 @@ bool WireGuardTunnel::isHandshakeFresh(qint64 maxAgeSeconds) const
         return false;
     }
     return age <= maxAgeSeconds;
+}
+
+bool WireGuardTunnel::isUsable() const
+{
+    if (m_status.state != State::Up) {
+        return false;
+    }
+#if defined(Q_OS_WIN)
+    // No handshake timestamp is readable here, so interface presence is the strongest
+    // available signal. See the class comment on isUsable().
+    return true;
+#else
+    return isHandshakeFresh();
+#endif
 }
 
 QString WireGuardTunnel::tunnelAddress(quint16 port) const

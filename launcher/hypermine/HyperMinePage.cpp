@@ -301,10 +301,10 @@ void HyperMinePage::applyPanelSettings()
     const QString address = ui->addressEdit->text().trimmed();
     m_client->setBaseUrl(address.isEmpty() ? QUrl{} : QUrl(address));
     m_client->setToken(ui->tokenEdit->text());
-    // isHandshakeFresh, not hasHandshake: a tunnel that handshaked an hour ago and then
-    // went stale is exactly the case the client's guard exists to catch, and "has
-    // handshaked once" would wave it through.
-    m_client->setTunnelUp(m_tunnel->isUp() && m_tunnel->isHandshakeFresh());
+    // isUsable(), not isHandshakeFresh(): on Windows no handshake timestamp is readable
+    // without elevation, so asking for one would mean never treating the link as up.
+    // isUsable() picks the right test per platform; see WireGuardTunnel.
+    m_client->setTunnelUp(m_tunnel->isUsable());
     refreshPanelAvailability();
 }
 
@@ -344,7 +344,7 @@ void HyperMinePage::onTunnelStatusChanged()
 {
     // The client's idea of whether the link is up has to follow the tunnel's, or
     // canSend() decides on a link state that is minutes out of date.
-    const bool linkUp = m_tunnel->isUp() && m_tunnel->isHandshakeFresh();
+    const bool linkUp = m_tunnel->isUsable();
     if (linkUp != m_client->tunnelUp()) {
         m_client->setTunnelUp(linkUp);
         appendLog(linkUp ? tr("The tunnel handshaked; the panel is reachable again.")
@@ -549,7 +549,7 @@ void HyperMinePage::refreshTunnelLabels()
         ui->statusLabel->setText(tr("Starting…"));
         break;
     case WireGuardTunnel::State::Up:
-        ui->statusLabel->setText(m_tunnel->isHandshakeFresh() ? tr("Connected") : tr("Up, waiting for a handshake"));
+        ui->statusLabel->setText(m_tunnel->isUsable() ? tr("Up") : tr("Up, waiting for a handshake"));
         break;
     case WireGuardTunnel::State::Failed:
         ui->statusLabel->setText(tr("Failed"));
@@ -629,10 +629,10 @@ void HyperMinePage::refreshPlayAddress()
         return;
     }
 
-    const bool ready = m_tunnel->isUp() && m_tunnel->isHandshakeFresh();
+    const bool ready = m_tunnel->isUsable();
     ui->playAddressLabel->setText(
         ready ? tr("Will connect to %1").arg(address)
-              : tr("Will connect to %1 once the tunnel has handshaked.").arg(address));
+              : tr("Will connect to %1 once the tunnel is up.").arg(address));
     ui->playButton->setEnabled(!ui->instanceCombo->currentData().toString().isEmpty());
 }
 
@@ -687,7 +687,7 @@ void HyperMinePage::tryCompletePendingPlay()
         return;
     }
 
-    if (!m_tunnel->isUp() || !m_tunnel->isHandshakeFresh()) {
+    if (!m_tunnel->isUsable()) {
         return;
     }
 
@@ -747,12 +747,15 @@ void HyperMinePage::onPendingPlayTimeout()
     }
     if (m_tunnel->isUp()) {
         clearPendingPlay();
+        // Worded for both platforms: on Windows there is no handshake timestamp to wait
+        // on, so the tunnel can be up while the server is still unreachable. Say what is
+        // actually known rather than blaming a handshake we cannot see.
         CustomMessageBox::selectable(
-            this, tr("The tunnel never connected"),
-            tr("The tunnel came up but never completed a handshake after %1 seconds, so %2 was not launched. Check "
-               "that the endpoint is reachable and that the keys match the server.")
-                .arg(kPlayHandshakeTimeoutMs / 1000)
-                .arg(address))
+            this, tr("The server is not reachable through the tunnel"),
+            tr("The %1 tunnel is up, but the server at %2 did not answer within %3 seconds, so nothing was "
+               "launched. Check that the server is running and that the tunnel's AllowedIPs cover its address.")
+                .arg(m_tunnel->interface().name, address)
+                .arg(kPlayHandshakeTimeoutMs / 1000))
             ->show();
         return;
     }
