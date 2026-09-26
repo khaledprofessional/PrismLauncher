@@ -75,7 +75,7 @@ HyperMinePage::HyperMinePage(QWidget* parent) : QWidget(parent)
     m_serverModel = new QStandardItemModel(this);
     m_serverModel->setHorizontalHeaderLabels({ "Name", "State", "Players", "Java" });
     ui->serverView->setModel(m_serverModel);
-    ui->serverView->horizontalHeader()->setSectionResizePolicy(QHeaderView::ResizeToContents);
+    ui->serverView->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     ui->serverView->verticalHeader()->setVisible(false);
 
     connect(ui->importButton, &QPushButton::clicked, this, &HyperMinePage::onImportClicked);
@@ -126,7 +126,10 @@ void HyperMinePage::reload()
     auto* settings = APPLICATION->settings();
     ui->addressEdit->setText(settings->get(kPanelUrlKey).toString());
     ui->tokenEdit->setText(settings->get(kPanelTokenKey).toString());
-    ui->autoTunnelCheck->setChecked(settings->get(kAutoTunnelKey).toBool(true));
+    // QVariant::toBool() takes no default in Qt 6, so the default lives here. An unset
+    // setting comes back as an invalid QVariant, which is what opts for "on".
+    const QVariant autoTunnel = settings->get(kAutoTunnelKey);
+    ui->autoTunnelCheck->setChecked(autoTunnel.isValid() ? autoTunnel.toBool() : true);
 
     // An address that was never set by hand follows the tunnel, which is where the panel
     // is expected to be. One that was set by hand is left alone.
@@ -488,8 +491,9 @@ quint16 HyperMinePage::targetPort() const
         return server->mcPort;
     }
     // Nothing selected: fall back to a remembered game port so Play still has a sensible
-    // target rather than silently doing nothing.
-    const int stored = APPLICATION->settings()->get(kDefaultMcPortKey).toInt(25565);
+    // target rather than silently doing nothing. toInt() takes no default in Qt 6, and
+    // yields 0 for an unset setting, so the fallback is applied here.
+    const int stored = APPLICATION->settings()->get(kDefaultMcPortKey).toInt();
     return (stored > 0 && stored <= 65535) ? static_cast<quint16>(stored) : quint16{25565};
 }
 
@@ -502,10 +506,8 @@ QUrl HyperMinePage::suggestedPanelUrl() const
     if (host.isEmpty()) {
         return {};
     }
-    const int port = APPLICATION->settings()->get(kPanelPortKey).toInt(kDefaultPanelPort);
-    if (port <= 0 || port > 65535) {
-        return {};
-    }
+    const int configured = APPLICATION->settings()->get(kPanelPortKey).toInt();
+    const int port = (configured > 0 && configured <= 65535) ? configured : kDefaultPanelPort;
     return QUrl(QStringLiteral("http://%1:%2").arg(host).arg(port));
 }
 
@@ -712,7 +714,7 @@ void HyperMinePage::tryCompletePendingPlay()
     // target, which is exactly what the --server command line option produces.
     auto target = std::make_shared<MinecraftTarget>(MinecraftTarget::parse(address, false));
 
-    appendLog(tr("Launching %1 into %2").arg(instance->name, address));
+    appendLog(tr("Launching %1 into %2").arg(instance->name(), address));
     APPLICATION->launch(instance, LaunchMode::Normal, target);
 }
 
