@@ -1,0 +1,85 @@
+name: HyperMine (Windows MSVC)
+
+# A Windows-only build, kept separate from build.yml so that verifying the HyperMine tab
+# costs one runner instead of six. build.yml is left exactly as upstream ships it, so
+# syncing the fork stays conflict-free.
+#
+# Produces a runnable PrismLauncher build of the current branch. Deliberately unsigned:
+# there is no signing certificate in a fork, so the artifact will warn on launch.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'feature/hypermine-*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build:
+    name: Windows-MSVC
+    runs-on: windows-2022
+
+    env:
+      ARTIFACT_NAME: Windows-MSVC-Qt6
+      BUILD_PLATFORM: official
+      BUILD_TYPE: Debug
+      CMAKE_PRESET: windows_msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Setup dependencies
+        id: setup-dependencies
+        uses: ./.github/actions/setup-dependencies
+        with:
+          build-type: ${{ env.BUILD_TYPE }}
+          artifact-name: Windows-MSVC
+          vcvars-arch: amd64
+          qt-version: 6.11.2
+
+      - name: Configure project
+        run: |
+          cmake --preset "$CMAKE_PRESET" -D VCPKG_HOST_TRIPLET="$VCPKG_TRIPLET" -D VCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET"
+
+      - name: Run build
+        run: |
+          cmake --build --preset "$CMAKE_PRESET" --config "$BUILD_TYPE"
+
+      - name: Collect the launcher
+        shell: pwsh
+        run: |
+          # cmake puts the binary under build/bin by default; find it rather than assume,
+          # since the preset is free to change where it lands.
+          $exe = Get-ChildItem -Path . -Recurse -Filter 'prismlauncher*.exe' -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } |
+                 Select-Object -First 1
+          if (-not $exe) { throw 'prismlauncher.exe not found after the build' }
+          Write-Host "Found: $($exe.FullName)"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item $exe.FullName out/ -Force
+          # Qt runtime DLLs and the Qt plugins, so the build runs without a Qt install.
+          $qtBin = Split-Path -Parent (Split-Path -Parent $exe.FullName)
+          foreach ($name in @('Qt6Core.dll','Qt6Gui.dll','Qt6Widgets.dll','Qt6Network.dll','Qt6Concurrent.dll','Qt6Xml.dll')) {
+            $hit = Get-ChildItem -Path $qtBin -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) { Copy-Item $hit.FullName out/ -Force }
+          }
+          $plugins = Join-Path $qtBin 'plugins'
+          if (Test-Path $plugins) {
+            Copy-Item $plugins out/ -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          Get-ChildItem out | Select-Object Name, Length
+
+      - name: Upload the launcher
+        uses: actions/upload-artifact@v4
+        with:
+          name: prismlauncher-hypermine-windows
+          path: out/
+          retention-days: 14
