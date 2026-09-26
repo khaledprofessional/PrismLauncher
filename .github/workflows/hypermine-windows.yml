@@ -17,7 +17,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -44,6 +45,16 @@ jobs:
           artifact-name: Windows-MSVC
           vcvars-arch: amd64
           qt-version: 6.11.2
+
+      - name: Disable the vcpkg binary cache
+        shell: bash
+        run: |
+          # Upstream's setup points vcpkg's binary cache at a GitHub Packages feed owned by
+          # PrismLauncher, authenticated with a token scoped to write packages. Neither
+          # exists on a fork, so a cache lookup there can only fail -- and "clear" in the
+          # source list also wipes the default. Building the dependencies from source is
+          # slower but actually works without secrets.
+          echo "VCPKG_BINARY_SOURCES=clear" >> "$GITHUB_ENV"
 
       - name: Configure project
         run: |
