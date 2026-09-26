@@ -20,7 +20,6 @@
 
 #include <optional>
 
-#include <QElapsedTimer>
 #include <QString>
 #include <QVector>
 
@@ -113,7 +112,8 @@ class HyperMinePage : public QWidget {
     /** Set when Play is waiting on a handshake. */
     QString m_pendingInstanceId;
     QString m_pendingAddress;
-    QElapsedTimer m_pendingSince;
     /** Bounds how long a Play click waits. Not the tunnel's poll timer. */
     QTimer* m_pendingPlayTimer = nullptr;
+    /** Whether the panel label is currently showing a "cannot reach the panel" reason. */
+    bool m_panelBlocked = false;
 };

@@ -29,9 +29,12 @@
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QItemSelectionModel>
+#include <QStandardItem>
 #include <QStandardItemModel>
 #include <QTime>
 #include <QTimer>
+
+#include <memory>
 
 #include "Application.h"
 #include "FileSystem.h"
@@ -95,6 +98,8 @@ HyperMinePage::HyperMinePage(QWidget* parent) : QWidget(parent)
     connect(m_client, &HyperMineClient::serversReceived, this, &HyperMinePage::onServersReceived);
     connect(m_client, &HyperMineClient::requestFailed, this, &HyperMinePage::onRequestFailed);
     connect(m_client, &HyperMineClient::actionFinished, this, &HyperMinePage::onActionFinished);
+    // Stop the panel buttons firing a second request while one is in flight.
+    connect(m_client, &HyperMineClient::busyChanged, this, &HyperMinePage::refreshButtonStates);
 
     connect(APPLICATION->instances(), &InstanceList::instancesChanged, this, &HyperMinePage::populateInstances);
 
@@ -109,7 +114,10 @@ HyperMinePage::HyperMinePage(QWidget* parent) : QWidget(parent)
     reload();
 }
 
-HyperMinePage::~HyperMinePage() = default;
+HyperMinePage::~HyperMinePage()
+{
+    delete ui;
+}
 
 void HyperMinePage::reload()
 {
@@ -228,7 +236,9 @@ void HyperMinePage::onImportClicked()
     }
 
     refreshTunnelLabels();
-    refreshPanelAvailability();
+    // The derived address above was written to the widget and to settings; push it into
+    // the client too, or the panel buttons stay disabled until the user presses Save.
+    applyPanelSettings();
     refreshPlayAddress();
 
     if (ui->autoTunnelCheck->isChecked()) {
@@ -238,12 +248,12 @@ void HyperMinePage::onImportClicked()
 
 void HyperMinePage::onForgetClicked()
 {
-    if (m_tunnel->isUp()) {
-        m_tunnel->bringDown();
-    }
-    m_tunnel->clearInterface();
-    APPLICATION->settings()->set(kConfPathKey, QString());
     clearPendingPlay();
+    // forget() tears the tunnel down before discarding the config. Doing it the other
+    // way round here would cancel the uninstall half-way and leave the interface
+    // installed with nothing left to manage it.
+    m_tunnel->forget();
+    APPLICATION->settings()->set(kConfPathKey, QString());
     appendLog(tr("Forgot the imported tunnel."));
     refreshTunnelLabels();
     refreshPanelAvailability();
@@ -288,7 +298,10 @@ void HyperMinePage::applyPanelSettings()
     const QString address = ui->addressEdit->text().trimmed();
     m_client->setBaseUrl(address.isEmpty() ? QUrl{} : QUrl(address));
     m_client->setToken(ui->tokenEdit->text());
-    m_client->setTunnelUp(m_tunnel->isUp() && m_tunnel->hasHandshake());
+    // isHandshakeFresh, not hasHandshake: a tunnel that handshaked an hour ago and then
+    // went stale is exactly the case the client's guard exists to catch, and "has
+    // handshaked once" would wave it through.
+    m_client->setTunnelUp(m_tunnel->isUp() && m_tunnel->isHandshakeFresh());
     refreshPanelAvailability();
 }
 
@@ -328,7 +341,7 @@ void HyperMinePage::onTunnelStatusChanged()
 {
     // The client's idea of whether the link is up has to follow the tunnel's, or
     // canSend() decides on a link state that is minutes out of date.
-    const bool linkUp = m_tunnel->isUp() && m_tunnel->hasHandshake();
+    const bool linkUp = m_tunnel->isUp() && m_tunnel->isHandshakeFresh();
     if (linkUp != m_client->tunnelUp()) {
         m_client->setTunnelUp(linkUp);
         appendLog(linkUp ? tr("The tunnel handshaked; the panel is reachable again.")
@@ -574,7 +587,7 @@ void HyperMinePage::refreshButtonStates()
     ui->forgetButton->setEnabled(hasTunnel);
 
     const bool haveSelection = selectedServer().has_value();
-    const bool panelOk = m_client->canSend();
+    const bool panelOk = m_client->canSend() && !m_client->isBusy();
     ui->refreshButton->setEnabled(panelOk);
     ui->startButton->setEnabled(panelOk && haveSelection);
     ui->stopButton->setEnabled(panelOk && haveSelection);
@@ -582,16 +595,23 @@ void HyperMinePage::refreshButtonStates()
 
 void HyperMinePage::refreshPanelAvailability()
 {
-    // Cleared first: a stale "the panel is unreachable" message must not outlive the
-    // condition that produced it.
+    // Whether the label is currently showing a "cannot reach the panel" reason. Tracked
+    // explicitly rather than by matching the label's text, because the word "tunnel" in a
+    // standalone lookup is a different translation unit from the same word inside a
+    // sentence -- so a text match silently stops working in any non-English build.
     const QString reason = m_client->blockedReason();
-    if (reason.isEmpty()) {
-        if (ui->panelStatusLabel->text().contains(tr("tunnel")) && !m_servers.isEmpty()) {
-            ui->panelStatusLabel->setText(
-                tr("%n server(s) reported by the panel.", nullptr, m_servers.size()));
+    if (!reason.isEmpty()) {
+        if (!m_panelBlocked) {
+            m_panelBlocked = true;
+            ui->panelStatusLabel->setText(reason);
         }
-    } else {
-        ui->panelStatusLabel->setText(reason);
+        return;
+    }
+    if (m_panelBlocked) {
+        m_panelBlocked = false;
+        ui->panelStatusLabel->setText(m_servers.isEmpty()
+                                          ? QString()
+                                          : tr("%n server(s) reported by the panel.", nullptr, m_servers.size()));
     }
 }
 
@@ -647,7 +667,6 @@ void HyperMinePage::beginPlay(const QString& instanceId, const QString& address)
 
     m_pendingInstanceId = instanceId;
     m_pendingAddress = address;
-    m_pendingSince.start();
 
     if (ui->autoTunnelCheck->isChecked() && !m_tunnel->isUp()) {
         appendLog(tr("Bringing the tunnel up before launching."));
@@ -704,7 +723,6 @@ void HyperMinePage::clearPendingPlay()
     m_pendingPlayTimer->stop();
     m_pendingInstanceId.clear();
     m_pendingAddress.clear();
-    m_pendingSince.invalidate();
 }
 
 void HyperMinePage::onPendingPlayTimeout()
@@ -712,29 +730,45 @@ void HyperMinePage::onPendingPlayTimeout()
     if (m_pendingInstanceId.isEmpty()) {
         return;
     }
-    // Only complain if the tunnel was never going to be able to do it. If the user
-    // unticked "bring up first" then a down tunnel is a choice, not a failure.
-    if (m_tunnel->isUp() && !m_tunnel->isHandshakeFresh()) {
-        const QString address = m_pendingAddress;
+    const QString address = m_pendingAddress;
+
+    // Work out why nothing happened, rather than assuming. A tunnel that is up but has
+    // not handshaked is a real failure; a tunnel that never went up because the bring-up
+    // itself failed is a different one; and a tunnel that is down because the user
+    // unticked the auto-bring box is not a failure at all.
+    if (m_tunnel->state() == WireGuardTunnel::State::Failed) {
+        clearPendingPlay();
+        CustomMessageBox::selectable(
+            this, tr("The tunnel could not be brought up"),
+            tr("Bringing the tunnel up failed, so %1 was not launched. %2")
+                .arg(address, m_tunnel->status().error.isEmpty() ? tr("") : m_tunnel->status().error))
+            ->show();
+        return;
+    }
+    if (m_tunnel->isUp()) {
         clearPendingPlay();
         CustomMessageBox::selectable(
             this, tr("The tunnel never connected"),
             tr("The tunnel came up but never completed a handshake after %1 seconds, so %2 was not launched. Check "
-               "that the endpoint is reachable and the keys match the server.")
+               "that the endpoint is reachable and that the keys match the server.")
                 .arg(kPlayHandshakeTimeoutMs / 1000)
                 .arg(address))
             ->show();
         return;
     }
-    if (!m_tunnel->isUp()) {
-        const QString address = m_pendingAddress;
+    if (!ui->autoTunnelCheck->isChecked()) {
         clearPendingPlay();
         CustomMessageBox::selectable(
             this, tr("The tunnel is not up"),
             tr("The tunnel is down and 'Bring the tunnel up first' is off, so %1 was not launched.")
                 .arg(address))
             ->show();
+        return;
     }
+    // Auto-bring is on and the tunnel is still down without an error: the bring-up was
+    // never asked for. Give up quietly rather than accusing the user of a choice they
+    // did not make.
+    clearPendingPlay();
 }
 
 void HyperMinePage::appendLog(const QString& line)

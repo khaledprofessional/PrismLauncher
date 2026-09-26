@@ -88,6 +88,14 @@ class MainWindow : public QMainWindow {
 
    protected:
     QMenu* createPopupMenu() override;
+    /**
+     * Re-assert the instance toolbar's visibility to match the current tab.
+     *
+     * Application::showMainWindow calls restoreState() on this window after the
+     * constructor returns, and that restores toolbar visibility from the saved layout --
+     * undoing what showTab did. Re-syncing on show is the cheapest place to put it back.
+     */
+    void showEvent(QShowEvent* event) override;
 
    private slots:
     void onCatToggled(bool);

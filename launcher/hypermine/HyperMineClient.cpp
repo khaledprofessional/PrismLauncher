@@ -26,7 +26,6 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QTimer>
 
 namespace {
 
@@ -169,6 +168,11 @@ void HyperMineClient::fetchServers()
 {
     if (!canSend()) {
         emit requestFailed(blockedReason());
+        return;
+    }
+    if (m_busy) {
+        // A second refresh while one is already in flight would only race the first to
+        // deliver its older answer last.
         return;
     }
     setBusy(true);

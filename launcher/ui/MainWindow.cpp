@@ -68,6 +68,7 @@
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QShortcut>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QToolBar>
@@ -496,6 +497,16 @@ void MainWindow::retranslateUi()
 
 MainWindow::~MainWindow() {}
 
+void MainWindow::showEvent(QShowEvent* event)
+{
+    QMainWindow::showEvent(event);
+    // restoreState() runs after construction and restores toolbar visibility from the
+    // saved layout, which can contradict the tab that was restored. Put it back.
+    if (m_pageStack && m_pageStack->count() > 0) {
+        ui->instanceToolBar->setVisible(m_pageStack->currentIndex() == 0);
+    }
+}
+
 void MainWindow::setupTabStrip()
 {
     m_hyperMinePage = new HyperMinePage(ui->centralWidget);
@@ -559,10 +570,8 @@ void MainWindow::showTab(int index, bool runActivation)
 
     const bool onInstances = (bounded == 0);
     // The instance toolbar drives the instance list, so it has no business being live
-    // while a tab that has nothing to do with instances is in front. setToolBarVisibility
-    // is used rather than setVisible because it docks the toolbar back where it was
-    // instead of appending it to the end of the dock area.
-    setToolBarVisibility(ui->instanceToolBar, onInstances);
+    // while a tab that has nothing to do with instances is in front.
+    ui->instanceToolBar->setVisible(onInstances);
     if (!onInstances) {
         setInstanceActionsEnabled(false);
     } else {

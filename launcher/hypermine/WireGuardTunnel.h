@@ -123,6 +123,16 @@ class WireGuardTunnel : public QObject {
     void bringDown();
 
     /**
+     * Discard the loaded interface, tearing the tunnel down first if one is up.
+     *
+     * The ordering matters and is why this is not just {@link clearInterface}: clearing
+     * cancels any in-flight tool, so doing it while an uninstall is still running would
+     * abort the teardown and leave the interface installed at the OS level with no
+     * configuration left to bring it down again.
+     */
+    void forget();
+
+    /**
      * Re-read the interface from `wg show`. Cheap, non-blocking, and the only thing
      * that can discover a tunnel that came up or died outside this launcher.
      */
@@ -138,6 +148,8 @@ class WireGuardTunnel : public QObject {
    private:
     void setState(State state, const QString& error = {});
     void stopPolling();
+    /** Whether {@link runTool} should surface the tool's own log lines. */
+    void setForwardToolLogs(bool forward) { m_forwardToolLogs = forward; }
 
     /**
      * Path to the `wg` command-line utility, used for every status query. Empty if absent.
@@ -178,4 +190,8 @@ class WireGuardTunnel : public QObject {
     /** Repeats `refresh()` while a bring-up is in flight or a tunnel is up. */
     QTimer* m_pollTimer = nullptr;
     LoggedProcess* m_process = nullptr;
+    /** False for status polls, true while bringing a tunnel up or down. */
+    bool m_forwardToolLogs = true;
+    /** Consecutive `wg show` failures seen while the tunnel was up. */
+    int m_consecutiveFailures = 0;
 };

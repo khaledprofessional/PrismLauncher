@@ -18,7 +18,6 @@
 
 #include "WireGuardTunnel.h"
 
-#include <QCoreApplication>
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
@@ -32,8 +31,21 @@
 
 namespace {
 
-constexpr int kPollIntervalMs = 1500;
+/**
+ * How often the tunnel is polled while it is up.
+ *
+ * This is a status query, not a health check, so it does not need to be frequent enough
+ * to catch a millisecond blip. Five seconds also keeps a hand-brought tunnel and a
+ * launcher-managed one indistinguishable to the user.
+ */
+constexpr int kPollIntervalMs = 5000;
 constexpr int kStartTimeoutMs = 12000;
+
+/**
+ * Consecutive failed `wg show` calls tolerated while a tunnel is up before it is called
+ * down. One failure is routinely just a busy tunnel service; a run of them is not.
+ */
+constexpr int kFailureTolerance = 3;
 
 /**
  * Whether `text` is a plausible `host:port` endpoint.
@@ -196,13 +208,13 @@ QString WireGuardTunnel::confPath() const
 
 void WireGuardTunnel::setInterface(const WireGuardInterface& iface)
 {
-    // A different interface means the old status describes a tunnel that is no longer
-    // the one being talked about, and any in-flight bring-up is for that old tunnel.
-    if (iface.name != m_interface.name) {
-        stopPolling();
-        killPending();
-        m_status = Status{};
-    }
+    // Any re-import supersedes what is known about the old one, and a bring-up in flight
+    // was for the old keys. Not just a name change: the same file name with different
+    // keys is just as much a different tunnel.
+    stopPolling();
+    killPending();
+    m_status = Status{};
+    m_consecutiveFailures = 0;
     m_interface = iface;
 
     QString error;
@@ -221,6 +233,7 @@ void WireGuardTunnel::clearInterface()
     killPending();
     m_interface = WireGuardInterface{};
     m_status = Status{};
+    m_consecutiveFailures = 0;
     emit statusChanged();
 }
 
@@ -309,15 +322,34 @@ void WireGuardTunnel::runTool(const QString& program, const QStringList& args, s
     auto* process = new LoggedProcess(QStringConverter::Utf8, this);
     m_process = process;
 
-    // LoggedProcess reports stderr line by line. `wg show` only ever writes a dump to
-    // stdout, so nothing sensitive lands here -- but the dump itself must never be
-    // logged, because it contains the interface private key and the peer preshared key.
-    connect(process, &LoggedProcess::log, this, [this](const QStringList& lines, MessageLevel) {
-        for (const QString& line : lines) {
-            if (!line.trimmed().isEmpty()) {
-                emit logMessage(line);
+    // LoggedProcess reports stderr line by line, but it also emits its own bookkeeping
+    // ("Process exited with code 0.") on every run. Those are forwarded only for
+    // bring-up and teardown, where a single run is worth narrating; a status poll runs
+    // every few seconds and would otherwise bury the log in noise.
+    if (m_forwardToolLogs) {
+        connect(process, &LoggedProcess::log, this, [this](const QStringList& lines, MessageLevel) {
+            for (const QString& line : lines) {
+                if (!line.trimmed().isEmpty()) {
+                    emit logMessage(line);
+                }
             }
+        });
+    }
+
+    // A process that cannot be started never emits finished(), so m_process would stay
+    // set for good and the isBusy() guard in refresh() would wedge every later query.
+    connect(process, &QProcess::errorOccurred, this, [this, process, done](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) {
+            return;
         }
+        if (m_process == process) {
+            m_process = nullptr;
+        }
+        const QString reason = process->errorString();
+        process->deleteLater();
+        stopPolling();
+        setState(State::Failed, tr("Could not run '%1': %2").arg(program, reason));
+        done(-1, reason.toUtf8());
     });
 
     connect(process, &QProcess::finished, this, [this, process, done](int exitCode, QProcess::ExitStatus status) {
@@ -390,7 +422,9 @@ void WireGuardTunnel::bringUp()
 
     const QString conf = confPath();
     m_upSince.start();
+    m_consecutiveFailures = 0;
     const auto [program, args] = upInvocation(conf);
+    setForwardToolLogs(true);
 
     emit logMessage(tr("Bringing up the %1 tunnel...").arg(m_interface.name));
     setState(State::Starting);
@@ -422,7 +456,9 @@ void WireGuardTunnel::bringDown()
         return;
     }
     if (!controlToolAvailable()) {
-        setState(m_status.state, controlToolHint());
+        // Report the reason without pretending the tunnel changed state: it did not.
+        m_status.error = controlToolHint();
+        emit statusChanged();
         return;
     }
     if (m_status.state == State::Down) {
@@ -431,6 +467,7 @@ void WireGuardTunnel::bringDown()
 
     const QString conf = confPath();
     const auto [program, args] = downInvocation(m_interface.name, conf);
+    setForwardToolLogs(true);
 
     emit logMessage(tr("Taking down the %1 tunnel...").arg(m_interface.name));
     stopPolling();
@@ -445,6 +482,26 @@ void WireGuardTunnel::bringDown()
         m_status.lastHandshake = 0;
         setState(State::Down);
     });
+}
+
+void WireGuardTunnel::forget()
+{
+    // Tear down first, then discard. clearInterface() cancels any in-flight tool, so
+    // discarding while an uninstall is still running would abort it and leave the tunnel
+    // installed at the OS level with no configuration left to bring it down.
+    if (m_status.state == State::Up || m_status.state == State::Starting) {
+        connect(this, &WireGuardTunnel::statusChanged, this, [this] {
+            if (m_status.state == State::Down) {
+                // Only ever connected to the tunnel itself, so this cannot disturb the
+                // page's own connection.
+                disconnect(this, &WireGuardTunnel::statusChanged, this, nullptr);
+                clearInterface();
+            }
+        });
+        bringDown();
+        return;
+    }
+    clearInterface();
 }
 
 void WireGuardTunnel::refresh()
@@ -466,16 +523,20 @@ void WireGuardTunnel::refresh()
     }
 
     const QString name = m_interface.name;
+    setForwardToolLogs(false);
 
     // One `dump` rather than separate `latest-handshakes` / `listen-port` / `endpoints`
     // queries: it is a single round trip, and sibling queries started from one callback
     // would cancel each other.
     runTool(wg, { "show", name, "dump" }, [this, name](int exitCode, const QString& output) {
         if (exitCode != 0) {
-            // The interface is gone. Whether that is a failure or just the end depends on
-            // whether a bring-up was in flight.
+            // The interface is gone, or wg could not answer this once. Those are not the
+            // same thing: a service that is briefly busy during a roaming rekey should
+            // not be reported as a tunnel that died. Only a run of failures is believed.
+            ++m_consecutiveFailures;
             m_status.lastHandshake = 0;
             m_status.listenPort = 0;
+
             if (m_status.state == State::Starting) {
                 if (m_upSince.isValid() && m_upSince.elapsed() < kStartTimeoutMs) {
                     return;  // still inside the bring-up window; keep waiting
@@ -487,6 +548,9 @@ void WireGuardTunnel::refresh()
                              .arg(kStartTimeoutMs / 1000));
                 return;
             }
+            if (m_status.state == State::Up && m_consecutiveFailures < kFailureTolerance) {
+                return;  // treat as transient and let the next poll decide
+            }
             if (m_status.state == State::Up) {
                 emit logMessage(tr("The %1 tunnel went down.").arg(name));
             }
@@ -494,6 +558,7 @@ void WireGuardTunnel::refresh()
             setState(State::Down);
             return;
         }
+        m_consecutiveFailures = 0;
 
         const auto lines = output.split(QRegularExpression("\r\n|\n|\r"), Qt::SkipEmptyParts);
         if (lines.isEmpty()) {
