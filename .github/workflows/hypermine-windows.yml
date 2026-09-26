@@ -25,6 +25,13 @@ jobs:
     name: Windows-MSVC
     runs-on: windows-2022
 
+    # Match upstream's build.yml. Without this, `run` steps on Windows default to pwsh,
+    # where "$VCPKG_TRIPLET" expands as a PowerShell *variable* -- which does not exist,
+    # so it expands to nothing and vcpkg is handed an empty triplet.
+    defaults:
+      run:
+        shell: bash
+
     env:
       ARTIFACT_NAME: Windows-MSVC-Qt6
       BUILD_PLATFORM: official
@@ -62,13 +69,11 @@ jobs:
       # easy to miss: cmake carries on and only later complains that ECM is missing. As
       # its own step it is unambiguous, and --log-failed shows all of it.
       - name: Install vcpkg dependencies
-        shell: pwsh
+        shell: bash
         run: |
-          & cmake/vcpkg/bootstrap-vcpkg.bat -disableMetrics
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed ($LASTEXITCODE)" }
-          cmake/vcpkg/vcpkg.exe install --triplet "$env:VCPKG_TRIPLET" `
-            --x-install-root "$($PWD.Path)/vcpkg_installed"
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
+          cmake/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          cmake/vcpkg/vcpkg.exe install --triplet "$VCPKG_TRIPLET" \
+            --x-install-root "$GITHUB_WORKSPACE/vcpkg_installed"
 
       - name: Configure project
         run: |
