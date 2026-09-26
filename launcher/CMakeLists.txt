@@ -822,6 +822,16 @@ SET(LAUNCHER_SOURCES
     ui/ToolTipFilter.h
     ui/ToolTipFilter.cpp
 
+    # GUI - HyperMine tab and its WireGuard tunnel
+    hypermine/WireGuardConf.h
+    hypermine/WireGuardConf.cpp
+    hypermine/WireGuardTunnel.h
+    hypermine/WireGuardTunnel.cpp
+    hypermine/HyperMineClient.h
+    hypermine/HyperMineClient.cpp
+    hypermine/HyperMinePage.h
+    hypermine/HyperMinePage.cpp
+
     # FIXME: maybe find a better home for this.
     FileIgnoreProxy.cpp
     FileIgnoreProxy.h

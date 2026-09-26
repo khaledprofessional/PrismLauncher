@@ -58,6 +58,7 @@
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
@@ -67,9 +68,11 @@
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QShortcut>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QToolBar>
 #include <QToolButton>
+#include <QVBoxLayout>
 #include <QWidget>
 #include <QWidgetAction>
 #include <memory>
@@ -94,6 +97,7 @@
 
 #include "ui/GuiUtil.h"
 #include "ui/ViewLogWindow.h"
+#include "hypermine/HyperMinePage.h"
 #include "ui/dialogs/AboutDialog.h"
 #include "ui/dialogs/CopyInstanceDialog.h"
 #include "ui/dialogs/CreateShortcutDialog.h"
@@ -322,7 +326,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         view->setSourceOfGroupCollapseStatus(
             [](const QString& groupName) -> bool { return APPLICATION->instances()->isGroupCollapsed(groupName); });
         connect(view, &InstanceView::groupStateChanged, APPLICATION->instances(), &InstanceList::on_GroupStateChanged);
-        ui->horizontalLayout->addWidget(view);
+
+        // The instance view becomes the first tab rather than the whole central widget.
+        setupTabStrip();
+        m_pageStack->addWidget(view);
+        m_pageStack->addWidget(m_hyperMinePage);
     }
     // The cat background
     {
@@ -418,6 +426,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
 
     setSelectedInstanceById(APPLICATION->settings()->get("SelectedInstance").toString());
 
+    // Restore the tab the user was last on. This has to happen here rather than in
+    // setupTabStrip, because m_statusLeft and the instance actions are only created by
+    // the time the constructor reaches this point, and showTab touches both. Activation
+    // is suppressed for the same reason: fetching the server list has no business running
+    // before the window is up.
+    if (APPLICATION->settings()->get("HyperMine/LastTab").toInt(0) == 1) {
+        showTab(1, false);
+    }
+
     // removing this looks stupid
     view->setFocus();
 
@@ -465,9 +482,117 @@ void MainWindow::retranslateUi()
         if (action->toolTip().contains("%1"))
             action->setToolTip(action->toolTip().arg(BuildConfig.LAUNCHER_DISPLAYNAME));
     }
+
+    // The tab strip is built in code, so its labels are not covered by uic and have to be
+    // retranslated by hand.
+    if (m_instancesTabButton) {
+        m_instancesTabButton->setText(tr("Instances"));
+    }
+    if (m_hyperMineTabButton) {
+        m_hyperMineTabButton->setText(tr("HyperMine"));
+        m_hyperMineTabButton->setToolTip(tr("Manage the HyperMine panel and the WireGuard tunnel to it"));
+    }
 }
 
 MainWindow::~MainWindow() {}
+
+void MainWindow::setupTabStrip()
+{
+    m_hyperMinePage = new HyperMinePage(ui->centralWidget);
+
+    m_pageStack = new QStackedWidget(ui->centralWidget);
+
+    m_tabStrip = new QWidget(ui->centralWidget);
+    auto* stripLayout = new QVBoxLayout(m_tabStrip);
+    stripLayout->setContentsMargins(0, 0, 0, 0);
+    stripLayout->setSpacing(0);
+
+    // An exclusive group is what makes these behave as tabs: checking one unchecks the
+    // other, so the strip can never show two "current" tabs or none.
+    auto* stripButtons = new QButtonGroup(m_tabStrip);
+    stripButtons->setExclusive(true);
+
+    const auto makeTabButton = [this, stripButtons](const QString& text, const QString& iconName) {
+        auto* button = new QToolButton(m_tabStrip);
+        button->setText(text);
+        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        button->setCheckable(true);
+        button->setAutoRaise(true);
+        button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        button->setIconSize(QSize(24, 24));
+        if (!iconName.isEmpty()) {
+            button->setIcon(QIcon::fromTheme(iconName));
+        }
+        stripButtons->addButton(button);
+        return button;
+    };
+
+    m_instancesTabButton = makeTabButton(tr("Instances"), QStringLiteral("applications-games"));
+    m_hyperMineTabButton = makeTabButton(tr("HyperMine"), QStringLiteral("network-server"));
+    m_hyperMineTabButton->setToolTip(tr("Manage the HyperMine panel and the WireGuard tunnel to it"));
+
+    stripLayout->addWidget(m_instancesTabButton);
+    stripLayout->addWidget(m_hyperMineTabButton);
+    // Push the tabs to the top so the strip does not stretch them down the window.
+    stripLayout->addStretch(1);
+
+    connect(m_instancesTabButton, &QToolButton::clicked, this, [this] { showTab(0); });
+    connect(m_hyperMineTabButton, &QToolButton::clicked, this, [this] { showTab(1); });
+
+    ui->horizontalLayout->addWidget(m_tabStrip);
+    ui->horizontalLayout->addWidget(m_pageStack, 1);
+
+    // The stack is still empty here, so the remembered tab is restored by the caller once
+    // the pages have been added. Only the button state can be set safely at this point.
+    syncTabButtons(0);
+}
+
+void MainWindow::showTab(int index, bool runActivation)
+{
+    if (!m_pageStack || m_pageStack->count() == 0) {
+        return;
+    }
+    const int bounded = qBound(0, index, m_pageStack->count() - 1);
+    m_pageStack->setCurrentIndex(bounded);
+    syncTabButtons(bounded);
+    APPLICATION->settings()->set("HyperMine/LastTab", bounded);
+
+    const bool onInstances = (bounded == 0);
+    // The instance toolbar drives the instance list, so it has no business being live
+    // while a tab that has nothing to do with instances is in front. setToolBarVisibility
+    // is used rather than setVisible because it docks the toolbar back where it was
+    // instead of appending it to the end of the dock area.
+    setToolBarVisibility(ui->instanceToolBar, onInstances);
+    if (!onInstances) {
+        setInstanceActionsEnabled(false);
+    } else {
+        // refreshCurrentInstance re-derives the toolbar from the current selection.
+        // selectionBad() would also do that, but it also clears the status bar, resets
+        // the icon and re-selects from the saved setting -- far too much to run just
+        // because the user tabbed away and back, and it loses the selection outright if
+        // the "SelectedInstance" setting is stale.
+        refreshCurrentInstance();
+    }
+
+    // Coming back to the tab is the moment to catch up: the tunnel and the panel may both
+    // have changed state while the user was elsewhere. Skipped during construction, where
+    // the status widgets this path touches do not exist yet.
+    if (!onInstances && runActivation && m_hyperMinePage) {
+        m_hyperMinePage->activate();
+    }
+}
+
+void MainWindow::syncTabButtons(int index)
+{
+    // Guarded rather than assumed: the strip is built before the stack is filled, so
+    // there is a window where a tab can be checked before its page exists.
+    if (m_instancesTabButton) {
+        m_instancesTabButton->setChecked(index == 0);
+    }
+    if (m_hyperMineTabButton) {
+        m_hyperMineTabButton->setChecked(index != 0);
+    }
+}
 
 QMenu* MainWindow::createPopupMenu()
 {

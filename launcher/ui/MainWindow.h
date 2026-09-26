@@ -51,6 +51,7 @@
 class LaunchController;
 class NewsChecker;
 class QToolButton;
+class QStackedWidget;
 class InstanceProxyModel;
 class LabeledToolButton;
 class QLabel;
@@ -61,6 +62,7 @@ class InstanceView;
 class KonamiCode;
 class InstanceTask;
 class LabeledToolButton;
+class HyperMinePage;
 
 namespace Ui {
 class MainWindow;
@@ -229,6 +231,26 @@ class MainWindow : public QMainWindow {
     void updateStatusCenter();
     void setInstanceActionsEnabled(bool enabled);
 
+    /**
+     * Build the left-hand tab strip and the stacked widget that holds the tab contents.
+     *
+     * Prism's central widget used to hold the instance view directly, with no navigation
+     * at all, so this introduces the first one. The strip is inside the central widget
+     * rather than the toolbar on purpose: the toolbar is user-customisable and can be
+     * hidden, and a tab you can accidentally hide is not a tab.
+     */
+    void setupTabStrip();
+    /**
+     * Show the tab at `index`, remembering the choice for the next launch.
+     *
+     * `runActivation` is false while the constructor is still running: the path this
+     * takes touches the status bar and instance actions, which do not exist yet at that
+     * point in construction.
+     */
+    void showTab(int index, bool runActivation = true);
+    /** Keep the tab strip's checked state in step with whatever changed the stack. */
+    void syncTabButtons(int index);
+
     void runModalTask(Task* task);
     void instanceFromInstanceTask(InstanceTask* task);
 
@@ -246,6 +268,13 @@ class MainWindow : public QMainWindow {
     KonamiCode* secretEventFilter = nullptr;
 
     unique_qobject_ptr<NewsChecker> m_newsChecker;
+
+    /** Tab strip. `m_pageStack` holds the tab contents, one widget per tab. */
+    QWidget* m_tabStrip = nullptr;
+    QStackedWidget* m_pageStack = nullptr;
+    QToolButton* m_instancesTabButton = nullptr;
+    QToolButton* m_hyperMineTabButton = nullptr;
+    HyperMinePage* m_hyperMinePage = nullptr;
 
     MinecraftInstance* m_selectedInstance = nullptr;
     QString m_currentInstIcon;
