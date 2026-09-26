@@ -58,7 +58,7 @@ constexpr int kDefaultPanelPort = 8080;
 /** How long Play waits for a handshake before giving up. */
 constexpr int kPlayHandshakeTimeoutMs = 30000;
 
-constexpr int kServerColumnCount = 5;
+constexpr int kServerColumnCount = 4;
 
 }  // namespace
 
@@ -73,7 +73,7 @@ HyperMinePage::HyperMinePage(QWidget* parent) : QWidget(parent)
     m_client = new HyperMineClient(this);
 
     m_serverModel = new QStandardItemModel(this);
-    m_serverModel->setHorizontalHeaderLabels({ "Name", "State", "Players", "Java", "Failsafe" });
+    m_serverModel->setHorizontalHeaderLabels({ "Name", "State", "Players", "Java" });
     ui->serverView->setModel(m_serverModel);
     ui->serverView->horizontalHeader()->setSectionResizePolicy(QHeaderView::ResizeToContents);
     ui->serverView->verticalHeader()->setVisible(false);
@@ -407,14 +407,12 @@ void HyperMinePage::populateServers(const QVector<HyperMineServer>& servers)
             players = QString::number(server.playersOnline);
         }
 
-        QString failsafe = QStringLiteral("-");
-        if (server.failsafeKnown) {
-            failsafe = server.damagedRegions > 0 ? tr("%n damaged region file(s)", nullptr, server.damagedRegions)
-                                                : tr("healthy");
-        }
-
+        // World integrity is intentionally not a column. The failsafe lives in the panel
+        // process beside the world it protects; a column here could only ever be a stale
+        // copy of what the panel already knows, and it would invite the question of what
+        // the client would do about it. The answer is nothing: that is the server's job.
         const QStringList cells = { server.name.isEmpty() ? tr("(unnamed)") : server.name, server.state, players,
-                                    server.javaVersion, failsafe };
+                                    server.javaVersion };
 
         // setItem rather than appendRow: appendRow(item) starts a *new row* for each
         // item, which would give one row per column instead of one row per server.

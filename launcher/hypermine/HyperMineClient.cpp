@@ -43,13 +43,8 @@ HyperMineServer serverFromJson(const QJsonObject& object)
     server.playersMax = object.value("playersMax").toInt();
     server.javaVersion = object.value("javaVersion").toString();
 
-    const QJsonObject failsafe = object.value("failsafe").toObject();
-    if (!failsafe.isEmpty()) {
-        server.failsafeKnown = true;
-        server.damagedRegions = failsafe.value("damaged").toInt();
-        server.lastCheckpoint = static_cast<qint64>(failsafe.value("lastCheckpoint").toDouble());
-        server.mirroredRegions = failsafe.value("mirrored").toInt();
-    }
+    // Anything else the panel sends is ignored on purpose. World integrity in particular
+    // is a server-side concern; the client does not read, cache or re-check it.
     return server;
 }
 

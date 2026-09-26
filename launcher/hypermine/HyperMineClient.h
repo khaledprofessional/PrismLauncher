@@ -39,11 +39,6 @@ struct HyperMineServer {
     int playersOnline = 0;
     int playersMax = 0;
     QString javaVersion;
-    /** World integrity as of the last failsafe checkpoint, when the panel reports it. */
-    bool failsafeKnown = false;
-    int damagedRegions = 0;
-    qint64 lastCheckpoint = 0;
-    int mirroredRegions = 0;
 
     bool isRunning() const { return state == QLatin1String("running"); }
 };
@@ -63,11 +58,15 @@ struct HyperMineServer {
  *
  *     GET  /api/v1/servers
  *          -> { "servers": [ { "id", "name", "state", "mcPort", "playersOnline",
- *                               "playersMax", "javaVersion",
- *                               "failsafe": { "known", "damaged", "lastCheckpoint",
- *                                             "mirrored" } } ] }
+ *                               "playersMax", "javaVersion" } ] }
  *     POST /api/v1/servers/{id}/start
  *     POST /api/v1/servers/{id}/stop
+ *
+ * That is the whole surface. World integrity is deliberately absent: the failsafe runs
+ * only in the panel process, next to the world it protects, and the client has no
+ * business reading, re-checking or reporting on it. A launcher that showed world
+ * integrity would be one more place to look when a world looks wrong, and it could only
+ * ever be a stale copy of what the panel already knows.
  *
  * Every request carries `Authorization: Bearer <token>` when a token is set. A non-2xx
  * reply is reported as an error string rather than thrown, so a panel that is merely
