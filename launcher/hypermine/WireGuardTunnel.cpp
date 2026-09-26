@@ -237,7 +237,7 @@ void WireGuardTunnel::clearInterface()
     emit statusChanged();
 }
 
-void WireGuardTunnel::writeConfFile(QString* error) const
+bool WireGuardTunnel::writeConfFile(QString* error) const
 {
     const QString path = confPath();
     if (path.isEmpty()) {
@@ -338,7 +338,7 @@ void WireGuardTunnel::runTool(const QString& program, const QStringList& args, s
 
     // A process that cannot be started never emits finished(), so m_process would stay
     // set for good and the isBusy() guard in refresh() would wedge every later query.
-    connect(process, &QProcess::errorOccurred, this, [this, process, done](QProcess::ProcessError error) {
+    connect(process, &QProcess::errorOccurred, this, [this, process, done, program](QProcess::ProcessError error) {
         if (error != QProcess::FailedToStart) {
             return;
         }

@@ -174,7 +174,8 @@ class WireGuardTunnel : public QObject {
     /** Program and arguments that take the tunnel down. */
     static QPair<QString, QStringList> downInvocation(const QString& interfaceName, const QString& conf);
 
-    void writeConfFile(QString* error) const;
+    /** Write the canonical `<name>.conf`. False on failure, with `error` set. */
+    bool writeConfFile(QString* error) const;
     /** Run a tool, collect its stdout, and invoke `done` on the event thread. */
     void runTool(const QString& program, const QStringList& args, std::function<void(int, const QString&)> done);
     /** Cancel any in-flight tool without its completion handler running. */
