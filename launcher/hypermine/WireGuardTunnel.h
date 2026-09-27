@@ -28,6 +28,8 @@
 
 #include "WireGuardConf.h"
 
+#include "ElevatedProcess.h"
+
 class LoggedProcess;
 class QTimer;
 
@@ -235,8 +237,9 @@ class WireGuardTunnel : public QObject {
     /** Windows: the manager service only needs installing once per session. */
     bool m_managerEnsured = false;
     /** Windows: the elevated bring-up or tear-down currently in flight, if any. */
-    class ElevatedProcess* m_privileged = nullptr;
-    class QTimer* m_privilegedTimer = nullptr;
+    ElevatedProcess* m_privileged = nullptr;
+    /** Polls {@link m_privileged}; separate from the status poll. */
+    QTimer* m_privilegedTimer = nullptr;
     /** How long the privileged child has been running, for the give-up check. */
     QElapsedTimer m_privilegedDeadline;
     /** What the privileged child was asked to do, for error messages. */

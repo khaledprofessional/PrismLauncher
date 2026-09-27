@@ -224,13 +224,16 @@ void WireGuardTunnel::runPrivileged(const QString& program, const QStringList& a
     killPending();
 
     const QString tool = program;
-    auto* elevated = new ElevatedProcess(this);
+    // Plain new/delete rather than a QObject parent: every use is on the GUI thread, and
+    // the handle needs closing in the destructor, which a QObject child would not give us
+    // at a predictable moment.
+    auto* elevated = new ElevatedProcess();
     m_privileged = elevated;
 
     QString error;
     if (!elevated->start(tool, args, &error)) {
         m_privileged = nullptr;
-        elevated->deleteLater();
+        delete elevated;
         stopPolling();
         setState(State::Failed, error);
         return;
@@ -260,7 +263,7 @@ void WireGuardTunnel::pollPrivileged()
         // leaving the tab stuck in "Starting" forever.
         if (m_privilegedDeadline.isValid() && m_privilegedDeadline.elapsed() > kPrivilegedTimeoutMs) {
             m_privilegedTimer->stop();
-            m_privileged->deleteLater();
+            delete m_privileged;
             m_privileged = nullptr;
             stopPolling();
             setState(State::Failed,
@@ -273,7 +276,7 @@ void WireGuardTunnel::pollPrivileged()
 
     const int code = m_privileged->exitCode();
     m_privilegedTimer->stop();
-    m_privileged->deleteLater();
+    delete m_privileged;
     m_privileged = nullptr;
 
     if (code != 0) {
