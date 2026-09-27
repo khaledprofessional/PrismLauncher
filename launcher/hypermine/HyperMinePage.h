@@ -24,6 +24,7 @@
 #include <QVector>
 
 #include "HyperMineClient.h"
+#include "ServerProbe.h"
 #include "WireGuardTunnel.h"
 
 class QStandardItemModel;
@@ -76,6 +77,8 @@ class HyperMinePage : public QWidget {
     void onActionFinished(const QString& serverId, bool success, const QString& message);
     /** Fired when a Play click has waited as long as it is willing to. */
     void onPendingPlayTimeout();
+    /** Fired when the server's reachability may have changed. */
+    void onProbeResultChanged();
 
    private:
     void loadTunnelFromSettings();
@@ -109,6 +112,8 @@ class HyperMinePage : public QWidget {
     QStandardItemModel* m_serverModel = nullptr;
 
     QVector<HyperMineServer> m_servers;
+    /** Whether the server behind the tunnel is answering. */
+    ServerProbe* m_probe = nullptr;
     /** Set when Play is waiting on a handshake. */
     QString m_pendingInstanceId;
     QString m_pendingAddress;

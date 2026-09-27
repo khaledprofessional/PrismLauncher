@@ -201,6 +201,17 @@ class WireGuardTunnel : public QObject {
      * `wg show`, which needs elevation there. See the implementation for why.
      */
     void refreshFromNetworkStack();
+    /**
+     * Run a bring-up or tear-down with administrator rights, polling for completion so a
+     * stuck child can be abandoned rather than waited on forever.
+     *
+     * `fatalOnFailure` distinguishes the two callers: failing to bring a tunnel up is an
+     * error, while failing to take one down usually means it is already gone, which is
+     * the outcome that was wanted.
+     */
+    void runPrivileged(const QString& program, const QStringList& args, const QString& what, bool fatalOnFailure);
+    /** Poll the privileged child started by {@link runPrivileged}. */
+    void pollPrivileged();
 
     /** Write the canonical `<name>.conf`. False on failure, with `error` set. */
     bool writeConfFile(QString* error) const;
@@ -223,6 +234,15 @@ class WireGuardTunnel : public QObject {
     bool m_forwardToolLogs = true;
     /** Windows: the manager service only needs installing once per session. */
     bool m_managerEnsured = false;
+    /** Windows: the elevated bring-up or tear-down currently in flight, if any. */
+    class ElevatedProcess* m_privileged = nullptr;
+    class QTimer* m_privilegedTimer = nullptr;
+    /** How long the privileged child has been running, for the give-up check. */
+    QElapsedTimer m_privilegedDeadline;
+    /** What the privileged child was asked to do, for error messages. */
+    QString m_privilegedWhat;
+    /** Whether a non-zero exit from that child should be reported as a failure. */
+    bool m_privilegedFatal = true;
     /** Consecutive `wg show` failures seen while the tunnel was up. */
     int m_consecutiveFailures = 0;
 };

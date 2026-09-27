@@ -72,6 +72,9 @@ HyperMinePage::HyperMinePage(QWidget* parent) : QWidget(parent)
 
     m_client = new HyperMineClient(this);
 
+    m_probe = new ServerProbe(this);
+    connect(m_probe, &ServerProbe::resultChanged, this, &HyperMinePage::onProbeResultChanged);
+
     m_serverModel = new QStandardItemModel(this);
     m_serverModel->setHorizontalHeaderLabels({ "Name", "State", "Players", "Java" });
     ui->serverView->setModel(m_serverModel);
@@ -549,7 +552,16 @@ void HyperMinePage::refreshTunnelLabels()
         ui->statusLabel->setText(tr("Starting…"));
         break;
     case WireGuardTunnel::State::Up:
-        ui->statusLabel->setText(m_tunnel->isUsable() ? tr("Up") : tr("Up, waiting for a handshake"));
+        // Prefer the probe: on Windows there is no handshake to report, and everywhere
+        // else "the server answers" is a better thing to show than "a handshake
+        // happened", which only ever described the last packet.
+        if (m_probe->isReachable()) {
+            ui->statusLabel->setText(tr("Connected"));
+        } else if (m_probe->hasResult()) {
+            ui->statusLabel->setText(tr("Up, server not answering"));
+        } else {
+            ui->statusLabel->setText(tr("Up"));
+        }
         break;
     case WireGuardTunnel::State::Failed:
         ui->statusLabel->setText(tr("Failed"));
@@ -615,24 +627,51 @@ void HyperMinePage::refreshPanelAvailability()
     }
 }
 
+void HyperMinePage::onProbeResultChanged()
+{
+    // The probe is the only trustworthy "can I actually join" signal on Windows, so it
+    // feeds the same places the tunnel state does.
+    refreshTunnelLabels();
+    refreshPanelAvailability();
+    refreshPlayAddress();
+    tryCompletePendingPlay();
+}
+
 void HyperMinePage::refreshPlayAddress()
 {
     if (!m_tunnel->hasInterface()) {
+        m_probe->stop();
         ui->playAddressLabel->setText(tr("Import a WireGuard configuration to play through the tunnel."));
         ui->playButton->setEnabled(false);
         return;
     }
     const QString address = m_tunnel->tunnelAddress(targetPort());
     if (address.isEmpty()) {
+        m_probe->stop();
         ui->playAddressLabel->setText(tr("This configuration has no IPv4 peer address to connect to."));
         ui->playButton->setEnabled(false);
         return;
     }
 
-    const bool ready = m_tunnel->isUsable();
-    ui->playAddressLabel->setText(
-        ready ? tr("Will connect to %1").arg(address)
-              : tr("Will connect to %1 once the tunnel is up.").arg(address));
+    // Probe the address the game will actually use, but only while there is a tunnel to
+    // carry it -- probing a dead address every five seconds would just be noise.
+    if (m_tunnel->isUsable()) {
+        m_probe->watch(m_tunnel->interface().host(), targetPort());
+    } else {
+        m_probe->stop();
+    }
+
+    QString text;
+    if (!m_tunnel->isUsable()) {
+        text = tr("Will connect to %1 once the tunnel is up.").arg(address);
+    } else if (m_probe->isReachable()) {
+        text = tr("The server at %1 is answering.").arg(address);
+    } else if (m_probe->hasResult()) {
+        text = tr("The tunnel is up, but %1 is not answering. %2").arg(address, m_probe->lastError());
+    } else {
+        text = tr("Will connect to %1. Checking whether it answers…").arg(address);
+    }
+    ui->playAddressLabel->setText(text);
     ui->playButton->setEnabled(!ui->instanceCombo->currentData().toString().isEmpty());
 }
 
@@ -687,7 +726,11 @@ void HyperMinePage::tryCompletePendingPlay()
         return;
     }
 
-    if (!m_tunnel->isUsable()) {
+    // The tunnel must be up *and* the server must be answering. Requiring the probe is
+    // what makes this correct on Windows, where the tunnel cannot report a handshake, and
+    // it is the better test everywhere: launching into a tunnel that is up but carrying
+    // nothing just produces a connection-timeout screen.
+    if (!m_tunnel->isUsable() || !m_probe->isReachable()) {
         return;
     }
 

@@ -27,6 +27,7 @@
 #include <QStandardPaths>
 #include <QTimer>
 
+#include "ElevatedProcess.h"
 #include "LoggedProcess.h"
 #include "MessageLevel.h"
 
@@ -47,6 +48,15 @@ constexpr int kStartTimeoutMs = 12000;
  * down. One failure is routinely just a busy tunnel service; a run of them is not.
  */
 constexpr int kFailureTolerance = 3;
+
+/**
+ * How long an elevated bring-up or tear-down may run before it is abandoned.
+ *
+ * The bound exists because wireguard.exe will happily open a dialog and wait forever if
+ * anything is unexpected. Without this the tab would sit on "Starting" indefinitely with
+ * no way back.
+ */
+constexpr int kPrivilegedTimeoutMs = 30000;
 
 /**
  * Whether `text` is a plausible `host:port` endpoint.
@@ -198,6 +208,93 @@ QPair<QString, QStringList> WireGuardTunnel::downInvocation(const QString& inter
     Q_UNUSED(interfaceName)
     return { QStringLiteral("pkexec"), { wgQuickPath(), QStringLiteral("down"), conf } };
 #endif
+}
+
+/**
+ * Run a bring-up or tear-down command with administrator rights, polling for completion.
+ *
+ * On Windows this is the only way to install a tunnel, and doing it through
+ * QProcess::start would hang: wireguard.exe opens a dialog when it lacks the rights and
+ * waits for it to be answered. Going through the shell means the user gets a UAC prompt
+ * and either approves it or the start fails cleanly, and the poll below guarantees this
+ * returns even if the child misbehaves.
+ */
+void WireGuardTunnel::runPrivileged(const QString& program, const QStringList& args, const QString& what, bool fatalOnFailure)
+{
+    killPending();
+
+    const QString tool = program;
+    auto* elevated = new ElevatedProcess(this);
+    m_privileged = elevated;
+
+    QString error;
+    if (!elevated->start(tool, args, &error)) {
+        m_privileged = nullptr;
+        elevated->deleteLater();
+        stopPolling();
+        setState(State::Failed, error);
+        return;
+    }
+
+    m_privilegedDeadline.start();
+    if (!m_privilegedTimer) {
+        m_privilegedTimer = new QTimer(this);
+        m_privilegedTimer->setInterval(250);
+        connect(m_privilegedTimer, &QTimer::timeout, this, &WireGuardTunnel::pollPrivileged);
+    }
+    m_privilegedTimer->start();
+    m_privilegedWhat = what;
+    m_privilegedFatal = fatalOnFailure;
+}
+
+void WireGuardTunnel::pollPrivileged()
+{
+    if (!m_privileged || !m_privileged->isRunning()) {
+        m_privilegedTimer->stop();
+        return;
+    }
+
+    if (!m_privileged->finished()) {
+        // The child is alive but has not finished. If it has run this long something is
+        // wrong -- most likely a dialog is open somewhere -- so stop waiting rather than
+        // leaving the tab stuck in "Starting" forever.
+        if (m_privilegedDeadline.isValid() && m_privilegedDeadline.elapsed() > kPrivilegedTimeoutMs) {
+            m_privilegedTimer->stop();
+            m_privileged->deleteLater();
+            m_privileged = nullptr;
+            stopPolling();
+            setState(State::Failed,
+                     tr("Administrator rights were granted but %1 never finished. It may be waiting on a dialog; "
+                        "check for a WireGuard window.")
+                         .arg(m_privilegedWhat));
+        }
+        return;
+    }
+
+    const int code = m_privileged->exitCode();
+    m_privilegedTimer->stop();
+    m_privileged->deleteLater();
+    m_privileged = nullptr;
+
+    if (code != 0) {
+        stopPolling();
+        if (m_privilegedFatal) {
+            setState(State::Failed,
+                     tr("Could not %1 (the WireGuard tool returned %2).").arg(m_privilegedWhat).arg(code));
+        } else {
+            // A teardown that reports failure has usually achieved what it wanted: the
+            // interface is gone. Report Down and say why, rather than crying failure.
+            emit logMessage(tr("The WireGuard tool returned %1 while %2; treating the tunnel as down.")
+                                .arg(code)
+                                .arg(m_privilegedWhat));
+            m_status.lastHandshake = 0;
+            setState(State::Down);
+        }
+        return;
+    }
+    // The tool only acknowledges the request; the interface appearing is confirmed by
+    // the status poll, which is what decides Up or Failed.
+    refresh();
 }
 
 void WireGuardTunnel::ensureManagerService()
@@ -462,25 +559,26 @@ void WireGuardTunnel::bringUp()
 
     emit logMessage(tr("Bringing up the %1 tunnel...").arg(m_interface.name));
     setState(State::Starting);
-
-    // /installtunnels returns as soon as the service is asked to start, so the interface
-    // showing up is confirmed by polling rather than by the exit code. The timer is not
-    // restarted unnecessarily -- stopPolling first so a repeated click does not reset it.
     stopPolling();
     m_pollTimer->start();
 
+#if defined(Q_OS_WIN)
+    // Installing a tunnel needs administrator rights on Windows.
+    runPrivileged(program, args, tr("bring the tunnel up"), true);
+#else
     runTool(program, args, [this](int exitCode, const QString& output) {
         if (exitCode != 0) {
             const QString detail = output.trimmed();
             setState(State::Failed,
                      detail.isEmpty() ? tr("WireGuard could not bring the tunnel up (exit code %1).").arg(exitCode)
                                       : tr("WireGuard could not bring the tunnel up: %1").arg(detail));
-            m_pollTimer->stop();
+            stopPolling();
             return;
         }
         emit logMessage(tr("Tunnel %1 requested; waiting for the interface.").arg(m_interface.name));
         refresh();
     });
+#endif
 }
 
 void WireGuardTunnel::bringDown()
@@ -506,6 +604,10 @@ void WireGuardTunnel::bringDown()
     emit logMessage(tr("Taking down the %1 tunnel...").arg(m_interface.name));
     stopPolling();
 
+#if defined(Q_OS_WIN)
+    // Removing a tunnel needs administrator rights here, exactly as installing one does.
+    runPrivileged(program, args, tr("take the tunnel down"), false);
+#else
     runTool(program, args, [this](int exitCode, const QString& output) {
         if (exitCode != 0) {
             const QString detail = output.trimmed();
@@ -516,6 +618,7 @@ void WireGuardTunnel::bringDown()
         m_status.lastHandshake = 0;
         setState(State::Down);
     });
+#endif
 }
 
 void WireGuardTunnel::forget()

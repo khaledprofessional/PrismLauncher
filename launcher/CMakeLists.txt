@@ -825,6 +825,10 @@ SET(LAUNCHER_SOURCES
     # GUI - HyperMine tab and its WireGuard tunnel
     hypermine/WireGuardConf.h
     hypermine/WireGuardConf.cpp
+    hypermine/ElevatedProcess.h
+    hypermine/ElevatedProcess.cpp
+    hypermine/ServerProbe.h
+    hypermine/ServerProbe.cpp
     hypermine/WireGuardTunnel.h
     hypermine/WireGuardTunnel.cpp
     hypermine/HyperMineClient.h
